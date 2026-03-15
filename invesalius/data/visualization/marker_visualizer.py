@@ -53,6 +53,14 @@ class MarkerVisualizer:
         self.is_navigating = False
         self.is_target_mode = False
 
+        # Tooltip properties
+        self.marker_picker = vtk.vtkCellPicker()
+        self.marker_picker.SetTolerance(0.01)  # Increased tolerance for better detection
+        self.current_tooltip_marker = None
+        
+        # Store marker actors for picking
+        self.marker_actors = {}
+
         # The assembly for the current vector field, shown relative to the highlighted marker.
         self.vector_field_assembly = self.vector_field_visualizer.CreateVectorFieldAssembly()
 
@@ -80,6 +88,9 @@ class MarkerVisualizer:
         Publisher.subscribe(self.UpdateBrainTargets, "Update brain targets")
         Publisher.subscribe(self.UpdateNavigationStatus, "Navigation status")
         Publisher.subscribe(self.UpdateTargetMode, "Set target mode")
+        
+        # Add mouse move observer for tooltip
+        self.interactor.AddObserver("MouseMoveEvent", self.OnMouseMove)
         Publisher.subscribe(
             self.UpdateVectorFieldAssemblyVisibility, "Set vector field assembly visibility"
         )
@@ -182,6 +193,10 @@ class MarkerVisualizer:
             "highlighted": False,
             "hidden": False,
         }
+        
+        # Store marker reference for tooltip lookup
+        self.marker_actors[id(actor)] = marker
+        
         self.renderer.AddActor(actor)
 
         if render:
@@ -215,6 +230,11 @@ class MarkerVisualizer:
             "highlighted": False,
             "hidden": False,
         }
+
+        # Update marker_actors dictionary
+        if id(actor) in self.marker_actors:
+            del self.marker_actors[id(actor)]
+        self.marker_actors[id(new_actor)] = marker
 
         self.renderer.RemoveActor(actor)
         self.renderer.AddActor(new_actor)
@@ -264,6 +284,9 @@ class MarkerVisualizer:
         for marker in markers:
             actor = marker.visualization.get("actor")
             self.renderer.RemoveActor(actor)
+            # Remove from marker_actors dictionary
+            if id(actor) in self.marker_actors:
+                del self.marker_actors[id(actor)]
 
         if not self.is_navigating:
             self.interactor.Render()
@@ -271,6 +294,9 @@ class MarkerVisualizer:
     def DeleteMarker(self, marker):
         actor = marker.visualization.get("actor")
         self.renderer.RemoveActor(actor)
+        # Remove from marker_actors dictionary
+        if id(actor) in self.marker_actors:
+            del self.marker_actors[id(actor)]
         if not self.is_navigating:
             self.interactor.Render()
 
@@ -544,3 +570,48 @@ class MarkerVisualizer:
 
         if render:
             self.interactor.Render()
+
+    def OnMouseMove(self, obj, event):
+        """
+        Handle mouse move events to show tooltips for markers.
+        """
+        # Get mouse position
+        mouse_pos = self.interactor.GetEventPosition()
+        
+        # Pick at mouse position - try cell picker first
+        self.marker_picker.Pick(mouse_pos[0], mouse_pos[1], 0, self.renderer)
+        
+        # Get the picked actor
+        picked_actor = self.marker_picker.GetActor()
+        
+        if picked_actor is None:
+            # Try using GetProp3D as fallback
+            picked_actor = self.marker_picker.GetProp3D()
+        
+        if picked_actor is not None:
+            # Check if this actor is a marker
+            actor_id = id(picked_actor)
+            if actor_id in self.marker_actors:
+                marker = self.marker_actors[actor_id]
+                
+                # Build tooltip text
+                tooltip_parts = []
+                if hasattr(marker, 'label') and marker.label:
+                    tooltip_parts.append(f"Label: {marker.label}")
+                if hasattr(marker, 'notes') and marker.notes:
+                    tooltip_parts.append(f"Notes: {marker.notes}")
+                if hasattr(marker, 'mep_value') and marker.mep_value:
+                    tooltip_parts.append(f"MEP: {marker.mep_value}")
+                
+                if tooltip_parts:
+                    tooltip_text = "\n".join(tooltip_parts)
+                    # Only update tooltip if it changed
+                    if self.current_tooltip_marker != marker:
+                        self.interactor.SetToolTip(tooltip_text)
+                        self.current_tooltip_marker = marker
+                    return
+        
+        # No marker found under cursor, clear tooltip
+        if self.current_tooltip_marker is not None:
+            self.interactor.SetToolTip("")
+            self.current_tooltip_marker = None
