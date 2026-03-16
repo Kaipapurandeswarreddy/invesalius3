@@ -3277,9 +3277,6 @@ class MarkersPanel(wx.Panel, ColumnSorterMixin):
         edit_id = menu_id.Append(unique_menu_id, _("Change label"))
         menu_id.Bind(wx.EVT_MENU, self.ChangeLabel, edit_id)
 
-<<<<<<< HEAD
-        color_id = menu_id.Append(unique_menu_id + 1, _("Change color"))
-=======
         # Add "Edit Notes" menu item
         notes_id = menu_id.Append(unique_menu_id + 10, _("Edit Notes"))
         menu_id.Bind(wx.EVT_MENU, self.OnEditMarkerNotesMenu, notes_id)
@@ -3287,7 +3284,6 @@ class MarkersPanel(wx.Panel, ColumnSorterMixin):
         color_id = menu_id.Append(
             unique_menu_id + 1, _("Change color")
         )  # Increment the unique_menu_id
->>>>>>> f16e9cdd (Marker navigation enhancements)
         menu_id.Bind(wx.EVT_MENU, self.ChangeColor, color_id)
 
         delete_id = menu_id.Append(unique_menu_id + 2, _("Delete"))
