@@ -3110,10 +3110,10 @@ class MarkersPanel(wx.Panel, ColumnSorterMixin):
         """Reload all markers from MarkersControl to the list."""
         # Clear current list
         self.marker_list_ctrl.DeleteAllItems()
-        
+
         # Get number of columns
         num_columns = self.marker_list_ctrl.GetColumnCount()
-        
+
         # Add all markers from MarkersControl
         for idx, marker in enumerate(self.markers.list):
             list_entry = [""] * num_columns
@@ -3121,23 +3121,27 @@ class MarkersPanel(wx.Panel, ColumnSorterMixin):
             list_entry[const.SESSION_COLUMN] = str(marker.session_id)
             list_entry[const.MARKER_TYPE_COLUMN] = marker.marker_type.human_readable
             list_entry[const.LABEL_COLUMN] = marker.label
-            list_entry[const.Z_OFFSET_COLUMN] = str(marker.z_offset) if marker.z_offset != 0.0 else ""
+            list_entry[const.Z_OFFSET_COLUMN] = (
+                str(marker.z_offset) if marker.z_offset != 0.0 else ""
+            )
             list_entry[const.TARGET_COLUMN] = "Yes" if marker.is_target else ""
-            list_entry[const.POINT_OF_INTEREST_TARGET_COLUMN] = "Yes" if marker.is_point_of_interest else ""
+            list_entry[const.POINT_OF_INTEREST_TARGET_COLUMN] = (
+                "Yes" if marker.is_point_of_interest else ""
+            )
             list_entry[const.MEP_COLUMN] = str(marker.mep_value) if marker.mep_value else ""
             list_entry[const.UUID] = str(marker.marker_uuid) if marker.marker_uuid else ""
-            
+
             # Add notes if column exists
             if const.NOTES_COLUMN < num_columns:
-                list_entry[const.NOTES_COLUMN] = getattr(marker, 'notes', '')
-            
+                list_entry[const.NOTES_COLUMN] = getattr(marker, "notes", "")
+
             # Add items to list
             for col, text in enumerate(list_entry):
                 if col == 0:
                     self.marker_list_ctrl.InsertItem(idx, text)
                 else:
                     self.marker_list_ctrl.SetItem(idx, col, text)
-        
+
         # Refresh the list
         self.marker_list_ctrl.Refresh()
 
@@ -4256,10 +4260,7 @@ class MarkersPanel(wx.Panel, ColumnSorterMixin):
         # Ask for notes if not provided
         if notes is None:
             dialog = wx.TextEntryDialog(
-                self,
-                "Enter notes for this marker (optional):",
-                "Marker Notes",
-                ""
+                self, "Enter notes for this marker (optional):", "Marker Notes", ""
             )
             if dialog.ShowModal() == wx.ID_OK:
                 notes = dialog.GetValue()
@@ -4601,7 +4602,7 @@ class MarkersPanel(wx.Panel, ColumnSorterMixin):
         )
         list_entry[const.MEP_COLUMN] = str(marker.mep_value) if marker.mep_value else ""
         list_entry[const.UUID] = str(marker.marker_uuid) if marker.marker_uuid else ""
-        
+
         list_entry[const.NOTES_COLUMN] = marker.notes if hasattr(marker, "notes") else ""
 
         if self.session.GetConfig("debug"):
