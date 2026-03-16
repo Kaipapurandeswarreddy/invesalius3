@@ -3066,7 +3066,7 @@ class MarkersPanel(wx.Panel, ColumnSorterMixin):
     def OnSearchMarkers(self, event):
         """Filter markers based on search text."""
         search_text = self.txt_search.GetValue().lower()
-        
+
         # Store current marker data before clearing
         marker_data = []
         for idx in range(self.marker_list_ctrl.GetItemCount()):
@@ -3075,18 +3075,23 @@ class MarkersPanel(wx.Panel, ColumnSorterMixin):
                 item = self.marker_list_ctrl.GetItem(idx, col)
                 item_data.append(item.GetText())
             marker_data.append(item_data)
-        
+
         # Clear the list
         self.marker_list_ctrl.DeleteAllItems()
-        
+
         # Re-add markers that match the search
         for idx, data in enumerate(marker_data):
             label = data[const.LABEL_COLUMN].lower() if const.LABEL_COLUMN < len(data) else ""
             notes = data[const.NOTES_COLUMN].lower() if const.NOTES_COLUMN < len(data) else ""
             mep = data[const.MEP_COLUMN].lower() if const.MEP_COLUMN < len(data) else ""
-            
+
             # Check if search text matches any field
-            if not search_text or search_text in label or search_text in notes or search_text in mep:
+            if (
+                not search_text
+                or search_text in label
+                or search_text in notes
+                or search_text in mep
+            ):
                 # Add the item back - use current list count as index
                 list_idx = self.marker_list_ctrl.GetItemCount()
                 for col, text in enumerate(data):
@@ -3644,12 +3649,9 @@ class MarkersPanel(wx.Panel, ColumnSorterMixin):
             wx.MessageBox(_("No data selected."), _("InVesalius 3"))
             return
         marker = self.__get_marker(list_index)
-        current_notes = getattr(marker, 'notes', '')
+        current_notes = getattr(marker, "notes", "")
         dialog = wx.TextEntryDialog(
-            self,
-            "Enter notes for this marker:",
-            "Edit Notes",
-            current_notes
+            self, "Enter notes for this marker:", "Edit Notes", current_notes
         )
         if dialog.ShowModal() == wx.ID_OK:
             new_notes = dialog.GetValue()
@@ -4600,9 +4602,7 @@ class MarkersPanel(wx.Panel, ColumnSorterMixin):
         list_entry[const.MEP_COLUMN] = str(marker.mep_value) if marker.mep_value else ""
         list_entry[const.UUID] = str(marker.marker_uuid) if marker.marker_uuid else ""
         
-        # Only assign NOTES_COLUMN if it exists in the listctrl
-        if const.NOTES_COLUMN < num_columns:
-            list_entry[const.NOTES_COLUMN] = marker.notes if hasattr(marker, 'notes') else ""
+        list_entry[const.NOTES_COLUMN] = marker.notes if hasattr(marker, "notes") else ""
 
         if self.session.GetConfig("debug"):
             list_entry.append(round(marker.x, 1))

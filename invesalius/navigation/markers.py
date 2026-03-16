@@ -243,7 +243,7 @@ class MarkersControl(metaclass=Singleton):
     def ChangeNotes(self, marker: Marker, new_notes: str) -> None:
         """
         Change the notes field of a marker.
-        
+
         :param marker: instance of Marker
         :param new_notes: new notes string
         """

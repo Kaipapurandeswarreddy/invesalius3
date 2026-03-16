@@ -57,7 +57,7 @@ class MarkerVisualizer:
         self.marker_picker = vtk.vtkCellPicker()
         self.marker_picker.SetTolerance(0.01)  # Increased tolerance for better detection
         self.current_tooltip_marker = None
-        
+
         # Store marker actors for picking
         self.marker_actors = {}
 
@@ -88,7 +88,7 @@ class MarkerVisualizer:
         Publisher.subscribe(self.UpdateBrainTargets, "Update brain targets")
         Publisher.subscribe(self.UpdateNavigationStatus, "Navigation status")
         Publisher.subscribe(self.UpdateTargetMode, "Set target mode")
-        
+
         # Add mouse move observer for tooltip
         self.interactor.AddObserver("MouseMoveEvent", self.OnMouseMove)
         Publisher.subscribe(
@@ -193,10 +193,10 @@ class MarkerVisualizer:
             "highlighted": False,
             "hidden": False,
         }
-        
+
         # Store marker reference for tooltip lookup
         self.marker_actors[id(actor)] = marker
-        
+
         self.renderer.AddActor(actor)
 
         if render:
@@ -580,36 +580,36 @@ class MarkerVisualizer:
     def OnMouseMove(self, obj, event):
         """
         Handle mouse move events to show tooltips for markers.
-        
+
         Tooltip shows ONLY when:
         1. Cursor is over a marker, AND
         2. That marker is currently selected/highlighted (red)
-        
+
         When cursor moves off the marker, tooltip hides immediately.
         """
         # Get mouse position
         mouse_pos = self.interactor.GetEventPosition()
-        
+
         # Pick at mouse position - try cell picker first
         self.marker_picker.Pick(mouse_pos[0], mouse_pos[1], 0, self.renderer)
-        
+
         # Get the picked actor
         picked_actor = self.marker_picker.GetActor()
-        
+
         if picked_actor is None:
             # Try using GetProp3D as fallback
             picked_actor = self.marker_picker.GetProp3D()
-        
+
         # Check if cursor is over a marker
         if picked_actor is not None:
             # Check if this actor is a marker
             actor_id = id(picked_actor)
             if actor_id in self.marker_actors:
                 marker = self.marker_actors[actor_id]
-                
+
                 # Check if marker is selected/highlighted (red)
                 is_highlighted = marker.visualization.get("highlighted", False)
-                
+
                 # Only show tooltip if marker is highlighted/selected
                 if is_highlighted:
                     tooltip_text = self._BuildTooltipText(marker)
@@ -619,7 +619,7 @@ class MarkerVisualizer:
                         self.interactor.SetToolTip(tooltip_text)
                         self.current_tooltip_marker = marker
                         return
-        
+
         # Cursor is NOT over any highlighted marker - hide tooltip immediately
         if self.current_tooltip_marker is not None:
             self.interactor.SetToolTip("")
@@ -631,13 +631,13 @@ class MarkerVisualizer:
         Returns the tooltip text string or None if no tooltip info is available.
         """
         tooltip_parts = []
-        if hasattr(marker, 'label') and marker.label:
+        if hasattr(marker, "label") and marker.label:
             tooltip_parts.append(f"Label: {marker.label}")
-        if hasattr(marker, 'notes') and marker.notes:
+        if hasattr(marker, "notes") and marker.notes:
             tooltip_parts.append(f"Notes: {marker.notes}")
-        if hasattr(marker, 'mep_value') and marker.mep_value:
+        if hasattr(marker, "mep_value") and marker.mep_value:
             tooltip_parts.append(f"MEP: {marker.mep_value}")
-        
+
         if tooltip_parts:
             return "\n".join(tooltip_parts)
         return None
