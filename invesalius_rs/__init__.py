@@ -109,6 +109,10 @@ def count_regions(image: np.ndarray, number_regions: int) -> np.ndarray:
     return out
 
 
+# Texture generation function
+generate_surface_texture = _native.generate_surface_texture
+
+
 class Mesh:
     """
     Mesh wrapper class compatible with the original cy_mesh.Mesh interface.
@@ -294,4 +298,6 @@ __all__ = [
     "ca_smoothing",
     # Count regions
     "count_regions",
+    # Texture generation
+    "generate_surface_texture",
 ]

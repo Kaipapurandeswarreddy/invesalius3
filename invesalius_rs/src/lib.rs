@@ -14,6 +14,8 @@ mod transforms_py;
 mod types;
 mod count_regions;
 mod count_regions_py;
+mod texture;
+mod texture_py;
 
 /// InVesalius Rust extension module
 #[pymodule]
@@ -52,6 +54,9 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Count regions function
     m.add_function(wrap_pyfunction!(count_regions_py::count_regions, m)?)?;
+
+    // Texture generation function
+    m.add_function(wrap_pyfunction!(texture_py::generate_surface_texture, m)?)?;
 
     Ok(())
 }
