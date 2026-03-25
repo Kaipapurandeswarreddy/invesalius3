@@ -109,8 +109,10 @@ def count_regions(image: np.ndarray, number_regions: int) -> np.ndarray:
     return out
 
 
-# Texture generation function
+# Texture generation functions
 generate_surface_texture = _native.generate_surface_texture
+generate_tcoords = _native.generate_tcoords
+generate_tcoords_hf = _native.generate_tcoords_hf
 
 
 class Mesh:
@@ -150,8 +152,6 @@ class Mesh:
             _normals = numpy_support.vtk_to_numpy(pd.GetCellData().GetArray("Normals")).reshape(
                 -1, 3
             )
-
-            print(f"{_vertices.dtype=} {_faces.dtype=} {_normals.dtype=}")
 
             self._vertices = _vertices
             self._faces = _faces
@@ -300,4 +300,6 @@ __all__ = [
     "count_regions",
     # Texture generation
     "generate_surface_texture",
+    "generate_tcoords",
+    "generate_tcoords_hf",
 ]
