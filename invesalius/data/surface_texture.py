@@ -56,7 +56,6 @@ from invesalius.pubsub import pub as Publisher
 # Import the Rust texture generation module
 try:
     import invesalius_rs
-
     import invesalius_rs._native as _native
 
     HAS_NATIVE = True
