@@ -441,16 +441,15 @@ class InnerTaskPanel(wx.Panel):
             self.OnLinkExportMask()
 
     def OnLinkExportTexturedSurface(self, evt=None):
-        project = proj.Project()
-        visible_surfaces = []
-        for index in project.surface_dict:
-            if project.surface_dict[index].is_shown:
-                visible_surfaces.append(index)
+        import invesalius.data.surface_texture  # noqa: F401
 
-        if not visible_surfaces:
+        # Check if Volume Rendering is active
+        project = proj.Project()
+        config = project.raycasting_preset
+        if not config:
             dlg = wx.MessageDialog(
                 None,
-                _("You need to create a surface and make it ") + _("visible before exporting it."),
+                _("You need to enable Volume Rendering before exporting a textured surface."),
                 "InVesalius 3",
                 wx.OK | wx.ICON_INFORMATION,
             )
@@ -460,12 +459,7 @@ class InnerTaskPanel(wx.Panel):
                 dlg.Destroy()
             return
 
-        import invesalius.data.surface_texture  # noqa: F401
-
-        # Select the first visible surface
-        surface_index = visible_surfaces[0]
-
-        # 2. Show File Save Dialog with Format choice in the type dropdown
+        # Show File Save Dialog with Format choice in the type dropdown
         session = ses.Session()
         last_directory = session.GetConfig("last_directory_3d_surface", "")
         project_name = pathlib.Path(project.name).stem
@@ -498,10 +492,10 @@ class InnerTaskPanel(wx.Panel):
 
             dlg_save.Destroy()
 
-            # 3. Trigger export via pubsub (caught in surface_texture.py)
+            # Trigger export via pubsub (caught in surface_texture.py)
+            # No surface_index needed - Pipeline 2 auto-generates from VR
             Publisher.sendMessage(
                 "Export textured surface",
-                surface_index=surface_index,
                 format=export_format,
                 filename=filename,
                 parent=self.GetTopLevelParent(),

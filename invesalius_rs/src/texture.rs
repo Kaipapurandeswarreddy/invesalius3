@@ -32,6 +32,40 @@ fn uv_to_barycentric(
     [bar0, bar1, bar2]
 }
 
+/// Linearly interpolate the VR opacity transfer function curve.
+/// `opacity_curve` is an Nx2 array where column 0 = HU value, column 1 = opacity (0..1).
+/// The rows must be sorted by HU (ascending).
+#[inline]
+fn lookup_opacity(hu: f64, opacity_curve: &ArrayView2<f64>) -> f64 {
+    let n = opacity_curve.shape()[0];
+    if n == 0 {
+        return 0.0;
+    }
+    // Clamp to curve bounds
+    if hu <= opacity_curve[[0, 0]] {
+        return opacity_curve[[0, 1]];
+    }
+    if hu >= opacity_curve[[n - 1, 0]] {
+        return opacity_curve[[n - 1, 1]];
+    }
+    // Linear interpolation between surrounding points
+    for i in 1..n {
+        if hu <= opacity_curve[[i, 0]] {
+            let x0 = opacity_curve[[i - 1, 0]];
+            let x1 = opacity_curve[[i, 0]];
+            let y0 = opacity_curve[[i - 1, 1]];
+            let y1 = opacity_curve[[i, 1]];
+            let dx = x1 - x0;
+            if dx.abs() < 1e-10 {
+                return y1;
+            }
+            let t = (hu - x0) / dx;
+            return y0 + t * (y1 - y0);
+        }
+    }
+    opacity_curve[[n - 1, 1]]
+}
+
 /// Generate texture coordinates and texture image from mesh and volume data
 pub fn generate_surface_texture_internal<V, F, T>(
     vertices: ArrayView2<V>,
@@ -42,6 +76,7 @@ pub fn generate_surface_texture_internal<V, F, T>(
     window_width: i32,
     window_level: i32,
     clut: ArrayView2<u8>,
+    opacity_curve: ArrayView2<f64>,
     texture_dim: usize,
 ) -> (Array2<f64>, Array3<u8>, Array3<u8>)
 where
@@ -143,22 +178,26 @@ where
 
                 // Sample volume data at this position
                 let volume_val = trilinear_interpolate_internal(volume, px, py, pz);
+                let surface_hu = volume_val.into() as f64;
 
-                // Apply window/level logic
-                let gv = if volume_val.into() <= min_val {
+                // Apply window/level logic for CLUT index
+                let gv = if surface_hu <= min_val {
                     0.0
-                } else if volume_val.into() >= max_val {
+                } else if surface_hu >= max_val {
                     255.0
                 } else {
-                    ((volume_val.into() - (wl - 0.5)) / (ww - 1.0) + 0.5) * 255.0
+                    ((surface_hu - (wl - 0.5)) / (ww - 1.0) + 0.5) * 255.0
                 };
 
                 let gv_idx = (gv as usize).min(255);
 
-                // Apply color from CLUT
-                texture_image[[y, x, 0]] = clut[[gv_idx, 0]];
-                texture_image[[y, x, 1]] = clut[[gv_idx, 1]];
-                texture_image[[y, x, 2]] = clut[[gv_idx, 2]];
+                // Look up opacity from the VR transfer function
+                let surface_alpha = lookup_opacity(surface_hu, &opacity_curve);
+
+                // Apply color from CLUT, weighted by opacity
+                texture_image[[y, x, 0]] = (clut[[gv_idx, 0]] as f64 * surface_alpha) as u8;
+                texture_image[[y, x, 1]] = (clut[[gv_idx, 1]] as f64 * surface_alpha) as u8;
+                texture_image[[y, x, 2]] = (clut[[gv_idx, 2]] as f64 * surface_alpha) as u8;
 
                 // Calculate gradient for texture normals
                 let h = 1.0;
@@ -218,7 +257,7 @@ where
                             trilinear_interpolate_internal(volume, ray_px, ray_py, ray_pz);
                         let val = ray_val.into() as f64;
 
-                        // FIX: Restore dynamic WW/WL
+                        // Map raw HU to CLUT index via WW/WL
                         let ray_gv = if val <= min_val {
                             0.0
                         } else if val >= max_val {
@@ -228,7 +267,8 @@ where
                         };
 
                         let ray_gv_idx = (ray_gv as usize).min(255);
-                        let alpha = ray_gv / 255.0; // FIX: Removed the 0.15 hack
+                        // Use VR opacity transfer function instead of linear ramp
+                        let alpha = lookup_opacity(val, &opacity_curve);
 
                         cr += clut[[ray_gv_idx, 0]] as f64 * alpha * (1.0 - alphai);
                         cg += clut[[ray_gv_idx, 1]] as f64 * alpha * (1.0 - alphai);

@@ -26,6 +26,7 @@ use crate::types::{FaceArray, ImageTypes3, VertexArray};
 /// * window_width - Window width for visualization
 /// * window_level - Window level for visualization
 /// * clut - Color lookup table (256 x 3) - uint8
+/// * opacity_curve - VR opacity transfer function (Nx2, col0=HU, col1=opacity) - float64
 /// * texture_dim - Texture atlas dimension (default 5000)
 ///
 /// Returns tuple of (tcoords, texture_image, texture_normals)
@@ -43,6 +44,7 @@ pub fn generate_surface_texture(
     window_width: i32,
     window_level: i32,
     clut: numpy::PyReadonlyArray2<'_, u8>,
+    opacity_curve: numpy::PyReadonlyArray2<'_, f64>,
     texture_dim: usize,
 ) -> PyResult<Py<pyo3::PyAny>> {
     let spacing_arr = spacing.as_array();
@@ -68,6 +70,7 @@ pub fn generate_surface_texture(
                     window_width,
                     window_level,
                     clut.as_array().view(),
+                    opacity_curve.as_array().view(),
                     texture_dim,
                 );
 

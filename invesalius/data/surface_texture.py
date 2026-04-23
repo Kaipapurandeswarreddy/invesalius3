@@ -55,8 +55,9 @@ from invesalius.pubsub import pub as Publisher
 
 # Import the Rust texture generation module
 try:
-    import invesalius_rs
     import invesalius_rs._native as _native
+
+    import invesalius_rs
 
     HAS_NATIVE = True
 except ImportError:
@@ -569,14 +570,196 @@ def generate_surface_texture(
     return st
 
 
-def _export_textured_surface_worker(surface_index, format, filename):
+def get_opacity_curve_from_preset(config, ww=None, wl=None):
+    """
+    Extract the full VR opacity transfer function from a preset.
+
+    For advanced 16-bit presets, collects all (HU, opacity) points from
+    every opacity curve. For simple 8-bit presets, creates a linear ramp
+    from WW/WL bounds.
+
+    Parameters
+    ----------
+    config : dict
+        The raycasting preset dictionary (project.raycasting_preset).
+    ww : float, optional
+        Window width (used for simple presets).
+    wl : float, optional
+        Window level (used for simple presets).
+
+    Returns
+    -------
+    numpy.ndarray
+        Nx2 float64 array where column 0 = HU value, column 1 = opacity.
+        Sorted by HU ascending.
+    """
+    points = []
+
+    if config.get("advancedCLUT"):
+        for curve in config.get("16bitClutCurves", []):
+            for point in curve:
+                points.append((float(point["x"]), float(point["y"])))
+    else:
+        # Simple preset: linear ramp from window bounds
+        if ww is None:
+            ww = config.get("ww", DEFAULT_WW)
+        if wl is None:
+            wl = config.get("wl", DEFAULT_WL)
+        half_ww = float(ww) / 2.0
+        points.append((float(wl) - half_ww, 0.0))
+        points.append((float(wl) + half_ww, 1.0))
+
+    if not points:
+        # Fallback: fully opaque everywhere
+        points = [(-1024.0, 0.0), (3071.0, 1.0)]
+
+    # Sort by HU value and deduplicate
+    points.sort(key=lambda p: p[0])
+    return np.array(points, dtype="float64")
+
+
+def get_isovalues_from_preset(config):
+    """
+    Extract HU isosurface thresholds from a Volume Rendering preset.
+
+    For advanced 16-bit presets, finds the first HU value where opacity
+    exceeds a significance threshold (0.1). This captures all visible
+    anatomy including thin ribs, rather than only the densest bone.
+    For multi-curve presets, uses the highest such threshold to avoid
+    boxy skin envelopes.
+    For simple 8-bit presets, uses the WW/WL midpoint.
+
+    Parameters
+    ----------
+    config : dict
+        The raycasting preset dictionary (project.raycasting_preset).
+
+    Returns
+    -------
+    list of float
+        HU isovalues where opacity first becomes significant.
+    """
+    isovalues = []
+    if config.get("advancedCLUT"):
+        for curve in config.get("16bitClutCurves", []):
+            # Find the first point where opacity exceeds 0.1
+            for i, point in enumerate(curve):
+                if point["y"] > 0.1:
+                    if i > 0:
+                        prev = curve[i - 1]
+                        dy = point["y"] - prev["y"]
+                        if abs(dy) > 1e-9:
+                            # Interpolate where opacity crosses 0.1
+                            t = (0.1 - prev["y"]) / dy
+                            isovalue = prev["x"] + t * (point["x"] - prev["x"])
+                        else:
+                            isovalue = point["x"]
+                    else:
+                        isovalue = point["x"]
+                    isovalues.append(isovalue)
+                    break
+        # For multi-curve presets (e.g. Skin+Bone), use only the highest
+        # threshold to avoid capturing the skin envelope
+        if len(isovalues) > 1:
+            isovalues = [max(isovalues)]
+    else:
+        # For simple presets, use the window midpoint (WL) as isovalue
+        wl = config.get("wl", DEFAULT_WL)
+        isovalues.append(float(wl))
+    return isovalues
+
+
+def generate_surface_from_volume(imagedata, isovalues):
+    """
+    Generate an isosurface mesh from volume data using VR-derived thresholds.
+
+    Uses vtkFlyingEdges3D for fast parallel isosurface extraction at each
+    opacity-derived HU threshold, then merges multi-curve surfaces.
+
+    Parameters
+    ----------
+    imagedata : vtkImageData
+        The volume image data.
+    isovalues : list of float
+        HU isovalues from get_isovalues_from_preset().
+
+    Returns
+    -------
+    vtkPolyData
+        The generated surface mesh with computed normals.
+    """
+    from vtkmodules.vtkFiltersCore import (
+        vtkAppendPolyData,
+        vtkCleanPolyData,
+        vtkPolyDataNormals,
+        vtkQuadricDecimation,
+        vtkSmoothPolyDataFilter,
+    )
+
+    try:
+        from vtkmodules.vtkFiltersCore import vtkFlyingEdges3D
+
+        ContourClass = vtkFlyingEdges3D
+    except ImportError:
+        from vtkmodules.vtkFiltersCore import vtkContourFilter
+
+        ContourClass = vtkContourFilter
+
+    if len(isovalues) == 1:
+        contour = ContourClass()
+        contour.SetInputData(imagedata)
+        contour.SetValue(0, isovalues[0])
+        contour.Update()
+        polydata = contour.GetOutput()
+    else:
+        appender = vtkAppendPolyData()
+        for iso in isovalues:
+            contour = ContourClass()
+            contour.SetInputData(imagedata)
+            contour.SetValue(0, iso)
+            contour.Update()
+            appender.AddInputData(contour.GetOutput())
+        appender.Update()
+        polydata = appender.GetOutput()
+
+    # Clean duplicate points
+    cleaner = vtkCleanPolyData()
+    cleaner.SetInputData(polydata)
+    cleaner.Update()
+
+    # Light smoothing to reduce staircase artifacts while preserving detail
+    smoother = vtkSmoothPolyDataFilter()
+    smoother.SetInputData(cleaner.GetOutput())
+    smoother.SetNumberOfIterations(50)
+    smoother.SetRelaxationFactor(0.1)
+    smoother.FeatureEdgeSmoothingOff()
+    smoother.BoundarySmoothingOn()
+    smoother.Update()
+
+    # Gentle decimation to reduce polygon count (keep 70% of triangles)
+    decimator = vtkQuadricDecimation()
+    decimator.SetInputData(smoother.GetOutput())
+    decimator.SetTargetReduction(0.3)
+    decimator.Update()
+
+    # Recompute normals for proper shading after smoothing/decimation
+    normals_filter = vtkPolyDataNormals()
+    normals_filter.SetInputData(decimator.GetOutput())
+    normals_filter.SetFeatureAngle(80)
+    normals_filter.AutoOrientNormalsOn()
+    normals_filter.Update()
+
+    return normals_filter.GetOutput()
+
+
+def _export_textured_surface_worker(format, filename):
     import logging
 
     from invesalius.i18n import tr as _
     from invesalius.pubsub import pub as Publisher
 
     try:
-        _export_textured_surface_worker_inner(surface_index, format, filename)
+        _export_textured_surface_worker_inner(format, filename)
     except Exception as e:
         logger = logging.getLogger("invesalius")
         logger.error(f"Error in export worker: {e}", exc_info=True)
@@ -585,72 +768,134 @@ def _export_textured_surface_worker(surface_index, format, filename):
         )
 
 
-def _export_textured_surface_worker_inner(surface_index, format, filename):
+def _export_textured_surface_worker_inner(format, filename):
     import wx
 
     from invesalius import inv_paths
-    from invesalius.data.volume import Volume
     from invesalius.i18n import tr as _
     from invesalius.project import Project
 
     Publisher.sendMessage(
-        "Update texture export progress", progress=5, status=_("Preparing mesh and volume...")
+        "Update texture export progress",
+        progress=5,
+        status=_("Reading volume rendering preset..."),
     )
 
     project = Project()
-    if surface_index not in project.surface_dict:
+
+    # Get Volume instance (without creating a new one)
+    app = wx.GetApp()
+    if app and hasattr(app, "control"):
+        vol = app.control.volume
+    else:
+        from invesalius.data.volume import Volume
+
+        vol = Volume()
+
+    if not vol or not vol.exist:
         Publisher.sendMessage(
-            "Update texture export progress", progress=100, status=_("Error: Surface not found")
+            "Update texture export progress",
+            progress=100,
+            status=_("Error: Volume Rendering is not active"),
         )
         return
 
-    surface = project.surface_dict[surface_index]
-    polydata = surface.polydata
-    if polydata is None:
+    config = project.raycasting_preset
+    if not config:
         Publisher.sendMessage(
-            "Update texture export progress", progress=15, status=_("Processing mesh...")
+            "Update texture export progress",
+            progress=100,
+            status=_("Error: No raycasting preset loaded"),
         )
+        return
 
-    vertices, normals, faces = polydata_to_numpy(polydata)
+    ww = vol.ww if vol.ww is not None else DEFAULT_WW
+    wl = vol.wl if vol.wl is not None else DEFAULT_WL
 
     Publisher.sendMessage(
-        "Update texture export progress", progress=20, status=_("Reading raycasting preset...")
+        "Update texture export progress",
+        progress=10,
+        status=_("Extracting isosurface thresholds from VR preset..."),
     )
 
+    # Step 1: Extract isovalues from opacity curves
+    isovalues = get_isovalues_from_preset(config)
+    if not isovalues:
+        Publisher.sendMessage(
+            "Update texture export progress",
+            progress=100,
+            status=_("Error: Could not extract thresholds from preset"),
+        )
+        return
+
+    # Step 1b: Extract full opacity transfer function for raycaster
+    opacity_curve = get_opacity_curve_from_preset(config, ww=ww, wl=wl)
+
+    logger.info(f"Extracted isovalues from VR preset: {isovalues}")
+    logger.info(f"Opacity curve: {opacity_curve.shape[0]} points")
+
+    Publisher.sendMessage(
+        "Update texture export progress",
+        progress=15,
+        status=_("Generating surface from volume rendering..."),
+    )
+
+    # Step 2: Generate isosurface from volume data
+    imagedata = vol.image
+    if imagedata is None:
+        Publisher.sendMessage(
+            "Update texture export progress",
+            progress=100,
+            status=_("Error: Volume image data not available"),
+        )
+        return
+
+    polydata = generate_surface_from_volume(imagedata, isovalues)
+    n_points = polydata.GetNumberOfPoints()
+    n_cells = polydata.GetNumberOfCells()
+
+    if n_points == 0 or n_cells == 0:
+        Publisher.sendMessage(
+            "Update texture export progress",
+            progress=100,
+            status=_("Error: No surface generated (try different VR preset)"),
+        )
+        return
+
+    logger.info(f"Auto-generated surface: {n_points} vertices, {n_cells} faces")
+
+    Publisher.sendMessage(
+        "Update texture export progress",
+        progress=25,
+        status=_("Preparing mesh data..."),
+    )
+
+    # Step 3: Convert to numpy arrays
+    vertices, normals, faces = polydata_to_numpy(polydata)
+
+    # Step 4: Load volume matrix and spacing
     from invesalius.data.slice_ import Slice
 
     sl = Slice()
     matrix = sl.matrix
     if matrix is None:
         Publisher.sendMessage(
-            "Update texture export progress", progress=100, status=_("Error: No volume data loaded")
+            "Update texture export progress",
+            progress=100,
+            status=_("Error: No volume data loaded"),
         )
         return
 
     spacing = np.array(sl.spacing, dtype="float64")
 
     Publisher.sendMessage(
-        "Update texture export progress", progress=25, status=_("Reading raycasting preset...")
+        "Update texture export progress",
+        progress=30,
+        status=_("Reading color lookup table..."),
     )
 
-    # 1. Read WW/WL and 2. Read CLUT
-    # Do NOT instantiate Volume(), as it would register a ghost pubsub listener
-    # and crash the UI. Use the global Controller's instance instead.
-    app = wx.GetApp()
-    if app and hasattr(app, "control"):
-        vol = app.control.volume
-    else:
-        # Fallback if somehow run headless
-        from invesalius.data.volume import Volume
-
-        vol = Volume()
-
-    ww = vol.ww if vol.ww is not None else DEFAULT_WW
-    wl = vol.wl if vol.wl is not None else DEFAULT_WL
-
-    config = project.raycasting_preset
+    # Step 5: Load CLUT
     clut_name = config.get("CLUT", "No CLUT") if config else "No CLUT"
-
     clut_path = None
     if clut_name != "No CLUT":
         clut_path = os.path.join(
@@ -660,26 +905,22 @@ def _export_textured_surface_worker_inner(surface_index, format, filename):
 
     texture_dim = DEFAULT_TEXTURE_DIM
 
-    # 4. Y-axis alignment
-    # InVesalius meshes often have a negative Y axis due to VTK image flips.
-    # Shifting Y to positive space (subtracting the negative min) maps it to matrix indices.
-    # Because this shift acts as an inversion of the Y-axis, we MUST also invert the Y-normals
-    # so that rays cast inward into the tissue rather than outward into empty air (black patches).
+    # Step 6: Y-axis alignment
+    # Shift vertices to positive Y-space for matrix coordinate mapping.
+    # NOTE: Do NOT flip Y-normals — the auto-generated mesh from vtkPolyDataNormals
+    # already has correctly-oriented outward normals. This is just a translation.
     aligned_vertices = vertices.copy()
-    aligned_normals = normals.copy()
     y_min = aligned_vertices[:, 1].min()
     if y_min < 0:
         aligned_vertices[:, 1] -= y_min
-        aligned_normals[:, 1] = -aligned_normals[:, 1]
 
     Publisher.sendMessage(
         "Update texture export progress",
-        progress=30,
+        progress=35,
         status=_("Generating texture (this may take a few minutes)..."),
     )
 
-    # 5. Call Rust API
-    # Return types: tcoords (M, 6), image_rgb (H, W, 3), tnormals (H, W, 3)
+    # Step 7: Call Rust raycaster with VR opacity transfer function
     try:
         tcoords, image_rgb, tnormals = invesalius_rs.generate_surface_texture(
             aligned_vertices.astype("float64"),
@@ -690,12 +931,15 @@ def _export_textured_surface_worker_inner(surface_index, format, filename):
             int(ww),
             int(wl),
             clut,
+            opacity_curve,
             texture_dim,
         )
     except Exception as e:
         logger.error(f"Error calling rust generate_surface_texture: {e}")
         Publisher.sendMessage(
-            "Update texture export progress", progress=100, status=_("Error generating texture")
+            "Update texture export progress",
+            progress=100,
+            status=_("Error generating texture"),
         )
         return
 
@@ -703,22 +947,23 @@ def _export_textured_surface_worker_inner(surface_index, format, filename):
         "Update texture export progress", progress=80, status=_("Saving files...")
     )
 
+    # Step 8: Save texture PNG
     base_dir = os.path.dirname(filename)
     base_name = os.path.basename(filename)
     name_without_ext = os.path.splitext(base_name)[0]
 
-    # Replace spaces with underscores for the texture filename to prevent MTL parsing errors in external software
     safe_name = name_without_ext.replace(" ", "_").replace("-", "_")
     texture_filename = safe_name + "_texture.png"
     texture_filepath = os.path.join(base_dir, texture_filename)
 
-    # 6. Save texture PNG
     try:
         imsave(texture_filepath, image_rgb)
     except Exception as e:
         logger.error(f"Error saving texture PNG: {e}")
         Publisher.sendMessage(
-            "Update texture export progress", progress=100, status=_("Error saving texture PNG")
+            "Update texture export progress",
+            progress=100,
+            status=_("Error saving texture PNG"),
         )
         return
 
@@ -726,12 +971,12 @@ def _export_textured_surface_worker_inner(surface_index, format, filename):
         "Update texture export progress", progress=90, status=_("Writing 3D format...")
     )
 
+    # Step 9: Write OBJ or VRML
     try:
         if format == "OBJ":
             mtl_filename = name_without_ext + ".mtl"
             mtl_filepath = os.path.join(base_dir, mtl_filename)
 
-            # Write MTL
             with open(mtl_filepath, "w") as f:
                 f.write("newmtl material_0\n")
                 f.write("Ka 1.000000 1.000000 1.000000\n")
@@ -739,13 +984,12 @@ def _export_textured_surface_worker_inner(surface_index, format, filename):
                 f.write("Ks 0.000000 0.000000 0.000000\n")
                 f.write(f"map_Kd {texture_filename}\n")
 
-            # Write OBJ
             with open(filename, "w") as f:
                 f.write(f"mtllib {mtl_filename}\n")
                 for v in vertices:
-                    f.write(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
+                    f.write(f"v {v[0]:.6f} {-v[1]:.6f} {v[2]:.6f}\n")
                 for vn in normals:
-                    f.write(f"vn {vn[0]:.6f} {vn[1]:.6f} {vn[2]:.6f}\n")
+                    f.write(f"vn {vn[0]:.6f} {-vn[1]:.6f} {vn[2]:.6f}\n")
 
                 for i in range(len(faces)):
                     vt1 = (tcoords[i, 0], tcoords[i, 1])
@@ -759,7 +1003,6 @@ def _export_textured_surface_worker_inner(surface_index, format, filename):
 
                 vt_idx = 1
                 for i in range(len(faces)):
-                    # OBJ is 1-indexed
                     v1 = faces[i, 0] + 1
                     v2 = faces[i, 1] + 1
                     v3 = faces[i, 2] + 1
@@ -781,9 +1024,9 @@ def _export_textured_surface_worker_inner(surface_index, format, filename):
                 f.write("  geometry IndexedFaceSet {\n")
                 f.write("    coord Coordinate {\n")
                 f.write("      point [\n")
-                for i, v in enumerate(aligned_vertices):
-                    sep = "," if i < len(aligned_vertices) - 1 else ""
-                    f.write(f"        {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}{sep}\n")
+                for i, v in enumerate(vertices):
+                    sep = "," if i < len(vertices) - 1 else ""
+                    f.write(f"        {v[0]:.6f} {-v[1]:.6f} {v[2]:.6f}{sep}\n")
                 f.write("      ]\n")
                 f.write("    }\n")
 
@@ -817,7 +1060,9 @@ def _export_textured_surface_worker_inner(surface_index, format, filename):
     except Exception as e:
         logger.error(f"Error writing 3D format {format}: {e}")
         Publisher.sendMessage(
-            "Update texture export progress", progress=100, status=_("Error writing 3D file")
+            "Update texture export progress",
+            progress=100,
+            status=_("Error writing 3D file"),
         )
         return
 
@@ -826,337 +1071,43 @@ def _export_textured_surface_worker_inner(surface_index, format, filename):
     )
 
 
-def _start_export_textured_surface(surface_index, format, filename, parent):
+def _start_export_textured_surface(format, filename, parent):
+    import os
     import threading
 
-    from invesalius.gui.dialog_export_texture import ExportTextureProgressDialog
+    import wx
 
-    # Show progress dialog
+    from invesalius.gui.dialog_export_texture import ExportTextureProgressDialog
+    from invesalius.i18n import tr as _
+
+    # Show progress dialog immediately
     dlg = ExportTextureProgressDialog(parent)
 
-    # Start thread
-    thread = threading.Thread(
-        target=_export_textured_surface_worker, args=(surface_index, format, filename)
-    )
-    thread.daemon = True
-    thread.start()
+    def _launch_worker():
+        """Start the background thread after the dialog is fully visible."""
+        thread = threading.Thread(target=_export_textured_surface_worker, args=(format, filename))
+        thread.daemon = True
+        thread.start()
 
+    # Delay thread start by 100ms so the dialog is fully rendered first
+    wx.CallLater(100, _launch_worker)
+
+    # Block until the export finishes (dialog EndModal's itself)
     dlg.ShowModal()
+    export_success = dlg._export_success
     dlg.Destroy()
+
+    # Show success or error dialog
+    if export_success:
+        base_name = os.path.basename(filename)
+        msg_dlg = wx.MessageDialog(
+            parent,
+            _("File saved successfully!\n\n") + base_name,
+            _("Export Complete"),
+            wx.OK | wx.ICON_INFORMATION,
+        )
+        msg_dlg.ShowModal()
+        msg_dlg.Destroy()
 
 
 Publisher.subscribe(_start_export_textured_surface, "Export textured surface")
-
-
-def export_textured_surface(surface_index, output_path, export_format="obj"):
-    """
-    Export a textured 3D surface to OBJ or VRML format.
-
-    This function generates a texture from volume rendering data and exports
-    the mesh with texture coordinates to the specified format.
-
-    Parameters
-    ----------
-    surface_index : int
-        Index of the surface in Project().surface_dict.
-    output_path : str
-        Output file path (without extension).
-    export_format : str
-        Export format: "obj" (default) or "vrml".
-
-    Raises
-    ------
-    RuntimeError
-        If native texture generation is unavailable.
-    ValueError
-        If surface index is invalid or volume data is not loaded.
-    """
-    if not HAS_NATIVE:
-        raise RuntimeError(
-            "invesalius_rs._native module not available. Please rebuild invesalius_rs."
-        )
-
-    # Import required modules
-    import invesalius.project as prj
-    from invesalius import inv_paths
-    from invesalius.data.slice_ import Slice
-    from invesalius.i18n import tr as _
-
-    # Get project
-    project = prj.Project()
-
-    # Validate surface index
-    if surface_index not in project.surface_dict:
-        raise ValueError(f"Surface index {surface_index} not found in project.")
-
-    surface = project.surface_dict[surface_index]
-    if surface.polydata is None:
-        raise ValueError(f"Surface {surface_index} has no polydata.")
-
-    Publisher.sendMessage(
-        "Update texture export progress", progress=10, status=_("Loading mesh data...")
-    )
-
-    # Get mesh data
-    vertices, normals, faces = polydata_to_numpy(surface.polydata)
-    logger.info(f"Mesh loaded: {len(vertices)} vertices, {len(faces)} faces")
-
-    Publisher.sendMessage(
-        "Update texture export progress", progress=20, status=_("Loading volume data...")
-    )
-
-    # Get volume data from Slice
-    sl = Slice()
-    matrix = sl.matrix
-    if matrix is None:
-        raise ValueError("No volume data loaded in InVesalius.")
-    spacing = np.array(sl.spacing, dtype="float64")
-    logger.info(f"Volume: shape={matrix.shape}, spacing={spacing}")
-
-    Publisher.sendMessage(
-        "Update texture export progress", progress=30, status=_("Loading CLUT...")
-    )
-
-    # Get WW/WL and CLUT from raycasting preset
-    try:
-        config = project.raycasting_preset
-        ww = int(config.get("WW", DEFAULT_WW))
-        wl = int(config.get("WL", DEFAULT_WL))
-        clut_name = config.get("CLUT", "HotMetal")
-        clut_path = os.path.join(
-            str(inv_paths.RAYCASTING_PRESETS_DIRECTORY), "color_list", clut_name + ".plist"
-        )
-        clut = load_clut(str(clut_path), config=config, ww=ww, wl=wl)
-        logger.info(f"Using WW={ww}, WL={wl}, CLUT={clut_name}")
-    except Exception:
-        # Fallback to defaults
-        ww = DEFAULT_WW
-        wl = DEFAULT_WL
-        clut = load_clut(ww=ww, wl=wl)
-        logger.warning("Could not load preset CLUT, using default.")
-
-    Publisher.sendMessage(
-        "Update texture export progress", progress=40, status=_("Applying spatial alignment...")
-    )
-
-    # Apply spatial alignment (mentor spec: mesh_min - [10, 10, 10])
-    mesh_min = np.min(vertices, axis=0)
-    dynamic_origin = mesh_min - np.array([10.0, 10.0, 10.0])
-    vertices = vertices - dynamic_origin
-    logger.info(f"Applied origin offset: {dynamic_origin}")
-
-    Publisher.sendMessage(
-        "Update texture export progress", progress=50, status=_("Generating surface texture...")
-    )
-
-    # Call Rust generate_surface_texture
-    # Returns (tcoords, texture_image, tnormals)
-    result = _native.generate_surface_texture(
-        vertices, normals, faces, matrix, spacing, ww, wl, clut, DEFAULT_TEXTURE_DIM
-    )
-
-    tcoords, texture_image, tnormals = result
-    logger.info(f"Texture generated: {texture_image.shape}")
-
-    Publisher.sendMessage(
-        "Update texture export progress", progress=70, status=_("Saving texture PNG...")
-    )
-
-    # Save texture PNG (Y-flip)
-    base_path = os.path.splitext(output_path)[0]
-    texture_filename = base_path + ".png"
-    imsave(texture_filename, texture_image[::-1, :])
-    logger.info(f"Texture saved to: {texture_filename}")
-
-    Publisher.sendMessage(
-        "Update texture export progress", progress=80, status=_("Writing mesh file...")
-    )
-
-    # Write OBJ or VRML based on format
-    if export_format.lower() == "obj":
-        _write_obj_with_texture(
-            output_path + ".obj",
-            vertices + dynamic_origin,  # Restore original position for export
-            normals,
-            faces,
-            tcoords,
-            texture_filename,
-        )
-    else:  # VRML
-        _write_vrml_with_texture(
-            output_path + ".vrml",
-            vertices + dynamic_origin,  # Restore original position for export
-            normals,
-            faces,
-            tcoords,
-            texture_filename,
-        )
-
-    Publisher.sendMessage(
-        "Update texture export progress", progress=100, status=_("Export complete!")
-    )
-
-    logger.info(f"Textured surface exported to: {output_path}")
-
-
-def _write_obj_with_texture(obj_path, vertices, normals, faces, tcoords, texture_path):
-    """
-    Write a Wavefront OBJ file with MTL and texture coordinates.
-
-    Parameters
-    ----------
-    obj_path : str
-        Path to output OBJ file.
-    vertices : numpy.ndarray
-        Vertex positions (N, 3).
-    normals : numpy.ndarray
-        Vertex normals (N, 3).
-    faces : numpy.ndarray
-        Face indices (M, 3).
-    tcoords : numpy.ndarray
-        Per-face texture coordinates (M, 6).
-    texture_path : str
-        Path to texture PNG file.
-    """
-    # Get base name for MTL file
-    import os
-
-    obj_dir = os.path.dirname(obj_path)
-    obj_base = os.path.splitext(os.path.basename(obj_path))[0]
-    mtl_path = obj_base + ".mtl"
-
-    # Write OBJ file
-    with open(obj_path, "w") as f:
-        # MTL library reference
-        f.write(f"mtllib {mtl_path}\n\n")
-        f.write(f"# Vertices: {len(vertices)}\n")
-        f.write(f"# Faces: {len(faces)}\n\n")
-
-        # Vertices
-        for v in vertices:
-            f.write(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
-        f.write("\n")
-
-        # Normals
-        for n in normals:
-            f.write(f"vn {n[0]:.6f} {n[1]:.6f} {n[2]:.6f}\n")
-        f.write("\n")
-
-        # Texture coordinates (per face, so duplicate for each vertex)
-        for tc in tcoords:
-            f.write(f"vt {tc[0]:.6f} {tc[1]:.6f}\n")
-            f.write(f"vt {tc[2]:.6f} {tc[3]:.6f}\n")
-            f.write(f"vt {tc[4]:.6f} {tc[5]:.6f}\n")
-        f.write("\n")
-
-        # Material
-        f.write("usemtl texture_material\n")
-
-        # Faces with texture coordinates (vt indices are sequential per face)
-        for i in range(len(faces)):
-            base_vt = i * 3 + 1  # OBJ is 1-indexed, and we have 3 vt per face
-            f.write(
-                f"f {faces[i][0] + 1}/{base_vt}/{faces[i][0] + 1} "
-                f"{faces[i][1] + 1}/{base_vt + 1}/{faces[i][1] + 1} "
-                f"{faces[i][2] + 1}/{base_vt + 2}/{faces[i][2] + 1}\n"
-            )
-
-    # Write MTL file
-    mtl_full_path = os.path.join(obj_dir, mtl_path)
-    with open(mtl_full_path, "w") as f:
-        f.write("newmtl texture_material\n")
-        f.write("Ka 1.0 1.0 1.0\n")  # Ambient
-        f.write("Kd 1.0 1.0 1.0\n")  # Diffuse
-        f.write("Ks 0.0 0.0 0.0\n")  # Specular
-        f.write("d 1.0\n")  # Opacity
-        f.write("illum 2\n")  # Lighting model
-        texture_rel = os.path.basename(texture_path)
-        f.write(f"map_Kd {texture_rel}\n")  # Diffuse texture map
-
-    logger.info(f"OBJ/MTL written to: {obj_path}")
-
-
-def _write_vrml_with_texture(vrml_path, vertices, normals, faces, tcoords, texture_path):
-    """
-    Write a VRML file with embedded texture coordinates.
-
-    Parameters
-    ----------
-    vrml_path : str
-        Path to output VRML file.
-    vertices : numpy.ndarray
-        Vertex positions (N, 3).
-    normals : numpy.ndarray
-        Vertex normals (N, 3).
-    faces : numpy.ndarray
-        Face indices (M, 3).
-    tcoords : numpy.ndarray
-        Per-face texture coordinates (M, 6).
-    texture_path : str
-        Path to texture PNG file.
-    """
-    import os
-
-    # Get relative texture path
-    vrml_dir = os.path.dirname(vrml_path)
-    texture_rel_path = os.path.relpath(texture_path, vrml_dir)
-
-    with open(vrml_path, "w") as f:
-        f.write("#VRML V2.0 utf8\n\n")
-        f.write("# Exported by InVesalius3\n")
-        f.write(f"# Vertices: {len(vertices)}, Faces: {len(faces)}\n\n")
-
-        # Shape node
-        f.write("Shape {\n")
-        f.write("  appearance Appearance {\n")
-        f.write("    texture ImageTexture {\n")
-        f.write(f'      url [ "{texture_rel_path}" ]\n')
-        f.write("    }\n")
-        f.write("    material Material {\n")
-        f.write("      diffuseColor 1 1 1\n")
-        f.write("      specularColor 0 0 0\n")
-        f.write("      ambientIntensity 1\n")
-        f.write("    }\n")
-        f.write("  }\n")
-
-        # IndexedFaceSet
-        f.write("  geometry IndexedFaceSet {\n")
-        f.write("      point [\n")
-
-        # Vertices as commas-separated values internally, but no trailing
-        for i, v in enumerate(vertices):
-            sep = "," if i < len(vertices) - 1 else ""
-            f.write(f"        {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}{sep}\n")
-        f.write("      ]\n")
-        f.write("    }\n")
-
-        # Coordinate indices
-        f.write("    coordIndex [\n")
-        for i, face in enumerate(faces):
-            sep = "," if i < len(faces) - 1 else ""
-            f.write(f"      {face[0]}, {face[1]}, {face[2]}, -1{sep}\n")
-        f.write("    ]\n")
-
-        # Texture coordinates
-        f.write("    texCoord TextureCoordinate {\n")
-        f.write("      point [\n")
-        # Each face needs 3 UV pairs
-        for i, tc in enumerate(tcoords):
-            sep = "," if i < len(tcoords) - 1 else ""
-            f.write(f"        {tc[0]:.6f} {tc[1]:.6f},\n")
-            f.write(f"        {tc[2]:.6f} {tc[3]:.6f},\n")
-            f.write(f"        {tc[4]:.6f} {tc[5]:.6f}{sep}\n")
-        f.write("      ]\n")
-        f.write("    }\n")
-
-        # Texture coordinate indices
-        f.write("    texCoordIndex [\n")
-        for i in range(len(faces)):
-            base = i * 3
-            sep = "," if i < len(faces) - 1 else ""
-            f.write(f"      {base}, {base + 1}, {base + 2}, -1{sep}\n")
-        f.write("    ]\n")
-        f.write("  }\n")
-        f.write("}\n")
-
-    logger.info(f"VRML written to: {vrml_path}")
